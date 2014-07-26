@@ -72,7 +72,7 @@ static Derivation parseDerivation(const string & s)
     while (!endOfList(str)) {
         DerivationOutput out;
         expect(str, "("); string id = parseString(str);
-        expect(str, ","); out.path = parsePath(str);
+        expect(str, ","); out.eqClass = parseString(str); // !!! parsePath
         expect(str, ","); out.hashAlgo = parseString(str);
         expect(str, ","); out.hash = parseString(str);
         expect(str, ")");
@@ -158,7 +158,7 @@ string unparseDerivation(const Derivation & drv)
     foreach (DerivationOutputs::const_iterator, i, drv.outputs) {
         if (first) first = false; else s += ',';
         s += '('; printString(s, i->first);
-        s += ','; printString(s, i->second.path);
+        s += ','; printString(s, i->second.eqClass);
         s += ','; printString(s, i->second.hashAlgo);
         s += ','; printString(s, i->second.hash);
         s += ')';
@@ -239,8 +239,8 @@ Hash hashDerivationModulo(StoreAPI & store, Derivation drv)
         DerivationOutputs::const_iterator i = drv.outputs.begin();
         return hashString(htSHA256, "fixed:out:"
             + i->second.hashAlgo + ":"
-            + i->second.hash + ":"
-            + i->second.path);
+            + i->second.hash /* !!! + ":"
+            + i->second.path);*/
     }
 
     /* For other derivations, replace the inputs paths with recursive

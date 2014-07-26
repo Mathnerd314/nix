@@ -46,6 +46,10 @@ Path dirOf(const Path & path);
    following the final `/'. */
 string baseNameOf(const Path & path);
 
+PathHash hashPartOf(const Path & path);
+
+string namePartOf(const Path & path);
+
 /* Check whether a given path is a descendant of the given
    directory. */
 bool isInDir(const Path & path, const Path & dir);
@@ -73,11 +77,13 @@ string readFile(const Path & path, bool drain = false);
 /* Write a string to a file. */
 void writeFile(const Path & path, const string & s);
 
+#if 0
 /* Read a line from a file descriptor. */
 string readLine(int fd);
 
 /* Write a line to a file descriptor. */
 void writeLine(int fd, string s);
+#endif
 
 /* Delete a path; i.e., in the case of a directory, it is deleted
    recursively.  Don't use this at home, kids.  The second variant
@@ -162,8 +168,10 @@ void writeFull(int fd, const unsigned char * buf, size_t count);
 MakeError(EndOfFile, Error)
 
 
+#if 0
 /* Read a file descriptor until EOF occurs. */
 string drainFD(int fd);
+#endif
 
 
 

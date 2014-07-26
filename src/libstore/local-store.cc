@@ -962,12 +962,76 @@ void LocalStore::queryReferrers(const Path & path, PathSet & referrers)
     } end_retry_sqlite;
 }
 
+void addOutputEqMember(const Transaction & txn,
+    const OutputEqClass & eqClass, const TrustId & trustId,
+    const Path & path)
+{
+    OutputEqMembers members;
+    queryOutputEqMembers(txn, eqClass, members);
 
+    for (OutputEqMembers::iterator i = members.begin();
+         i != members.end(); ++i)
+        if (i->trustId == trustId && i->path == path) return;
+    
+    OutputEqMember member;
+    member.trustId = trustId;
+    member.path = path;
+    members.push_back(member);
+
+    Strings ss;
+    
+    for (OutputEqMembers::iterator i = members.begin();
+         i != members.end(); ++i)
+    {
+        Strings ss2;
+        ss2.push_back(i->trustId);
+        ss2.push_back(i->path);
+        ss.push_back(packStrings(ss2));
+    }
+
+    nixDB.setStrings(txn, dbEquivalences, eqClass, ss);
+
+    OutputEqClasses classes;
+    queryOutputEqClasses(txn, path, classes);
+
+    classes.insert(eqClass);
+
+    nixDB.setStrings(txn, dbEquivalenceClasses, path,
+        Strings(classes.begin(), classes.end()));
+}
+
+
+void queryOutputEqMembers(const Transaction & txn,
+    const OutputEqClass & eqClass, OutputEqMembers & members)
+{
+    Strings ss;
+    nixDB.queryStrings(txn, dbEquivalences, eqClass, ss);
+
+    for (Strings::iterator i = ss.begin(); i != ss.end(); ++i) {
+        Strings ss2 = unpackStrings(*i);
+        if (ss2.size() != 2) continue;
+        Strings::iterator j = ss2.begin();
+        OutputEqMember member;
+        member.trustId = *j++;
+        member.path = *j++;
+        members.push_back(member);
+    }
+}
+
+
+void queryOutputEqClasses(const Transaction & txn,
+    const Path & path, OutputEqClasses & classes)
+{
+    Strings ss;
+    nixDB.queryStrings(txn, dbEquivalenceClasses, path, ss);
+    classes.insert(ss.begin(), ss.end());
+}
+#if 0
 Path LocalStore::queryDeriver(const Path & path)
 {
     return queryPathInfo(path).deriver;
 }
-
+#endif
 
 PathSet LocalStore::queryValidDerivers(const Path & path)
 {
@@ -1336,14 +1400,34 @@ void LocalStore::invalidatePath(const Path & path)
        care of deleting the references entries for `path'. */
 }
 
+// _addToStore -> addToStore -> addToStoreFromDump
 
 Path LocalStore::addToStoreFromDump(const string & dump, const string & name,
-    bool recursive, HashType hashAlgo, bool repair)
+//    bool recursive, HashType hashAlgo, bool repair)
+    const PathHash & selfHash, const PathSet & references) // code written as if recursive=true
 {
-    Hash h = hashString(hashAlgo, dump);
+    /* Hash the contents, modulo the previous hash reference (if it
+       had one). */
+    Hash contentHash = hashModulo(dump, selfHash);
+    // Hash h = hashString(hashAlgo, dump);
 
-    Path dstPath = makeFixedOutputPath(recursive, hashAlgo, h, name);
+    /* Construct the new store path. */ 
+    Path dstPath;
+    PathHash pathHash;
+    makeStorePath(contentHash, name, dstPath, pathHash);
+    // Path dstPath = makeFixedOutputPath(recursive, hashAlgo, h, name);
 
+    /* If the contents had a previous hash reference, rewrite those
+       references to the new hash. */
+    HashRewrites rewrites;
+    if (!selfHash.isNull()) {
+        rewrites[selfHash] = pathHash;
+        vector<int> positions;
+        dump = rewriteHashes(dump, rewrites, positions);
+        /* !!! debug code, remove */
+        PathHash contentHash2 = hashModulo(dump, pathHash);
+        assert(contentHash2 == contentHash);
+    }
     addTempRoot(dstPath);
 
     if (repair || !isValidPath(dstPath)) {
@@ -1378,11 +1462,19 @@ Path LocalStore::addToStoreFromDump(const string & dump, const string & name,
 
             optimisePath(dstPath); // FIXME: combine with hashPath()
 
+            /* Set the references for the new path.  Of course, any
+               hash rewrites have to be applied to the references,
+               too. */
+            PathSet references2 = rewriteReferences(references, rewrites);
+            
+            registerValidPath(dstPath, contentHash, references2, "");
+#if 0
             ValidPathInfo info;
             info.path = dstPath;
             info.hash = hash.first;
             info.narSize = hash.second;
             registerValidPath(info);
+#endif
         }
 
         outputLock.setDeletion(true);
@@ -1393,7 +1485,8 @@ Path LocalStore::addToStoreFromDump(const string & dump, const string & name,
 
 
 Path LocalStore::addToStore(const Path & _srcPath,
-    bool recursive, HashType hashAlgo, PathFilter & filter, bool repair)
+    const PathHash & selfHash, const string & suffix, const PathSet & references, const HashRewrites & rewrites)
+    // bool recursive, HashType hashAlgo, PathFilter & filter, bool repair)
 {
     Path srcPath(absPath(_srcPath));
     debug(format("adding `%1%' to the store") % srcPath);
@@ -1402,52 +1495,30 @@ Path LocalStore::addToStore(const Path & _srcPath,
        method for very large paths, but `copyPath' is mainly used for
        small files. */
     StringSink sink;
-    if (recursive)
+    if (recursive) {
+        SwitchToOriginalUser sw;
         dumpPath(srcPath, sink, filter);
-    else
+    } else
         sink.s = readFile(srcPath);
 
-    return addToStoreFromDump(sink.s, baseNameOf(srcPath), recursive, hashAlgo, repair);
+    if (rewrites.size() != 0) sink.s = rewriteHashes(sink.s, rewrites);
+
+    return addToStoreFromDump(sink.s, suffix == "" ? baseNameOf(srcPath) : suffix,
+        //recursive, hashAlgo, repair);
+        selfHash, rewriteReferences(references, rewrites));
 }
 
 
 Path LocalStore::addTextToStore(const string & name, const string & s,
     const PathSet & references, bool repair)
 {
-    Path dstPath = computeStorePathForText(name, s, references);
+    // Path dstPath = computeStorePathForText(name, s, references);
 
-    addTempRoot(dstPath);
-
-    if (repair || !isValidPath(dstPath)) {
-
-        PathLocks outputLock(singleton<PathSet, Path>(dstPath));
-
-        if (repair || !isValidPath(dstPath)) {
-
-            if (pathExists(dstPath)) deletePath(dstPath);
-
-            writeFile(dstPath, s);
-
-            canonicalisePathMetaData(dstPath, -1);
-
-            HashResult hash = hashPath(htSHA256, dstPath);
-
-            optimisePath(dstPath);
-
-            ValidPathInfo info;
-            info.path = dstPath;
-            info.hash = hash.first;
-            info.narSize = hash.second;
-            info.references = references;
-            registerValidPath(info);
-        }
-
-        outputLock.setDeletion(true);
-    }
-
-    return dstPath;
+    StringSink sink;
+    makeSingletonArchive(s, sink);
+    return addToStoreFromDump(sink.s, name,
+        PathHash(), references);
 }
-
 
 struct HashAndWriteSink : Sink
 {
@@ -1727,6 +1798,7 @@ bool LocalStore::verifyStore(bool checkContents, bool repair)
 
     bool errors = false;
 
+#if 0
     /* Acquire the global GC lock to prevent a garbage collection. */
     AutoCloseFD fdGCLock = openGCLock(ltWrite);
 
@@ -1797,6 +1869,7 @@ bool LocalStore::verifyStore(bool checkContents, bool repair)
             }
         }
     }
+#endif
 
     return errors;
 }
@@ -1930,6 +2003,7 @@ ValidPathInfo LocalStore::queryPathInfoOld(const Path & path)
 /* Upgrade from schema 5 (Nix 0.12) to schema 6 (Nix >= 0.15). */
 void LocalStore::upgradeStore6()
 {
+#if 0
     printMsg(lvlError, "upgrading Nix store to new schema (this may take a while)...");
 
     openDB(true);
@@ -1956,6 +2030,7 @@ void LocalStore::upgradeStore6()
     std::cerr << "\n";
 
     txn.commit();
+#endif
 }
 
 
@@ -1998,9 +2073,11 @@ static void makeMutable(const Path & path)
 /* Upgrade from schema 6 (Nix 0.15) to schema 7 (Nix >= 1.3). */
 void LocalStore::upgradeStore7()
 {
+#if 0
     if (getuid() != 0) return;
     printMsg(lvlError, "removing immutable bits from the Nix store (this may take a while)...");
     makeMutable(settings.nixStore);
+#endif
 }
 
 #else

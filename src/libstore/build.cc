@@ -647,26 +647,6 @@ HookInstance::~HookInstance()
 //////////////////////////////////////////////////////////////////////
 
 
-typedef map<string, string> HashRewrites;
-
-
-string rewriteHashes(string s, const HashRewrites & rewrites)
-{
-    foreach (HashRewrites::const_iterator, i, rewrites) {
-        assert(i->first.size() == i->second.size());
-        size_t j = 0;
-        while ((j = s.find(i->first, j)) != string::npos) {
-            debug(format("rewriting @ %1%") % j);
-            s.replace(j, i->second.size(), i->second);
-        }
-    }
-    return s;
-}
-
-
-//////////////////////////////////////////////////////////////////////
-
-
 typedef enum {rpAccept, rpDecline, rpPostpone} HookReply;
 
 class SubstitutionGoal;
@@ -757,7 +737,17 @@ private:
     Environment env;
 
     /* Hash rewriting. */
+    /* Builders build temporary store paths (e.g., `/nix/store/...random-hash...-aterm'), which are subsequently rewritten to actual content-addressable store paths (i.e., the hash part of the store path equals the hash of the contents). */
+
+    /* The hash rewrite map that rewrites output equivalences occurring
+       in the command-line arguments and environment variables to the
+       actual paths to be used. */
+    // HashRewrites rewrites;
     HashRewrites rewritesToTmp, rewritesFromTmp;
+    /* The map of output equivalence classes to temporary output
+       paths. */
+    // typedef map<OutputEqClass, Path> OutputMap;
+    // OutputMap tmpOutputs;
     typedef map<Path, Path> RedirectedOutputs;
     RedirectedOutputs redirectedOutputs;
 
@@ -834,6 +824,9 @@ private:
 
     /* Return the set of (in)valid paths. */
     PathSet checkPathValidity(bool returnValid, bool checkHash);
+-    PathSet checkPathValidity(bool returnValid);
++    typedef set<OutputEqClass> OutputEqClasses;
++    OutputEqClasses checkOutputValidity(bool returnValid);
 
     /* Abort the goal if `path' failed to build. */
     bool pathFailed(const Path & path);
@@ -971,11 +964,17 @@ void DerivationGoal::haveDerivation()
     /* Get the derivation. */
     drv = derivationFromPath(worker.store, drvPath);
 
+#if 0
     foreach (DerivationOutputs::iterator, i, drv.outputs)
         worker.store.addTempRoot(i->second.path);
 
     /* Check what outputs paths are not already valid. */
     PathSet invalidOutputs = checkPathValidity(false, buildMode == bmRepair);
+#endif
+
+    /* Check for what output path equivalence classes we do not
+       already have valid, trusted output paths. */
+    OutputEqClasses invalidOutputs = checkOutputValidity(false);
 
     /* If they are all valid, then we're done. */
     if (invalidOutputs.size() == 0 && buildMode == bmNormal) {
@@ -988,12 +987,14 @@ void DerivationGoal::haveDerivation()
     foreach (PathSet::iterator, i, invalidOutputs)
         if (pathFailed(*i)) return;
 
+#if 0
     /* We are first going to try to create the invalid output paths
        through substitutes.  If that doesn't work, we'll build
        them. */
     if (settings.useSubstitutes && !willBuildLocally(drv))
         foreach (PathSet::iterator, i, invalidOutputs)
             addWaitee(worker.makeSubstitutionGoal(*i, buildMode == bmRepair));
+#endif
 
     if (waitees.empty()) /* to prevent hang (no wake-up event) */
         outputsSubstituted();
@@ -1022,7 +1023,10 @@ void DerivationGoal::outputsSubstituted()
         return;
     }
 
+#if 0
     unsigned int nrInvalid = checkPathValidity(false, buildMode == bmRepair).size();
+#endif
+    unsigned int nrInvalid = checkOutputValidity(false).size();
     if (buildMode == bmNormal && nrInvalid == 0) {
         amDone(ecSuccess);
         return;
@@ -1134,11 +1138,13 @@ void DerivationGoal::inputsRealised()
     /* Gather information necessary for computing the closure and/or
        running the build hook. */
 
+#if 0
     /* The outputs are referenceable paths. */
     foreach (DerivationOutputs::iterator, i, drv.outputs) {
         debug(format("building path `%1%'") % i->second.path);
         allPaths.insert(i->second.path);
     }
+#endif
 
     /* Determine the full set of input paths. */
 
@@ -1150,19 +1156,52 @@ void DerivationGoal::inputsRealised()
         assert(worker.store.isValidPath(i->first));
         Derivation inDrv = derivationFromPath(worker.store, i->first);
         foreach (StringSet::iterator, j, i->second)
-            if (inDrv.outputs.find(*j) != inDrv.outputs.end())
-                computeFSClosure(worker.store, inDrv.outputs[*j].path, inputPaths);
-            else
-                throw Error(
-                    format("derivation `%1%' requires non-existent output `%2%' from input derivation `%3%'")
-                    % drvPath % *j % i->first);
+        {
+            OutputEqClass eqClass = findOutputEqClass(inDrv, *j);
+            PathSet inputs = findTrustedEqClassMembers(eqClass, currentTrustId);
+            if (inputs.size() == 0)
+                /* !!! shouldn't happen, except for garbage
+                   collection? */
+                throw Error(format("output `%1%' of derivation `%2%' is missing!")
+                    % *j % i->first);
+            for (PathSet::iterator k = inputs.begin(); k != inputs.end(); ++k) {
+                rewrites[hashPartOf(eqClass)] = hashPartOf(*k);
+                computeFSClosure(*k, inputPaths);
+            }
+        }
     }
 
     /* Second, the input sources. */
     foreach (PathSet::iterator, i, drv.inputSrcs)
         computeFSClosure(worker.store, *i, inputPaths);
 
+    /* There might be equivalence class collisions now.  That is,
+       different input closures might contain different paths from the
+       *same* output path equivalence class.  We should pick one from
+       each, and rewrite dependent paths. */
+    /* Don't forget to apply the rewritten paths to the hash rewrite map that's applied to the environment variables / command-line arguments. Otherwise the builder will still use the unconsolidated paths.  */
+    Replacements replacements;
+    inputPaths = consolidatePaths(inputPaths, false, replacements);
+
+    HashRewrites rewrites2;
+    for (Replacements::iterator i = replacements.begin();
+         i != replacements.end(); ++i)
+    {
+        printMsg(lvlError, format("HASH REWRITE %1% %2%")
+            % hashPartOf(i->first).toString() % hashPartOf(i->second).toString());
+        rewrites2[hashPartOf(i->first)] = hashPartOf(i->second);
+    }
+
+    for (HashRewrites::iterator i = rewrites.begin();
+         i != rewrites.end(); ++i)
+        rewrites[i->first] = PathHash(rewriteHashes(i->second.toString(), rewrites2));
+    
+    /* !!! remove, debug only */
+    Replacements dummy;
+    consolidatePaths(inputPaths, true, dummy);
+    
     debug(format("added input paths %1%") % showPaths(inputPaths));
+    printMsg(lvlError, format("added input paths %1%") % showPaths(inputPaths)); /* !!! */
 
     allPaths.insert(inputPaths.begin(), inputPaths.end());
 
@@ -1179,13 +1218,16 @@ void DerivationGoal::inputsRealised()
 }
 
 
+#if 0
 PathSet outputPaths(const DerivationOutputs & outputs)
 {
     PathSet paths;
+    /* XXX */
     foreach (DerivationOutputs::const_iterator, i, outputs)
         paths.insert(i->second.path);
     return paths;
 }
+#endif
 
 
 static string get(const StringPairs & map, const string & key)
@@ -1221,23 +1263,53 @@ void DerivationGoal::tryToBuild()
        because we're not allowing multi-threading.)  If so, put this
        goal to sleep until another goal finishes, then try again. */
     foreach (DerivationOutputs::iterator, i, drv.outputs)
+    {
+        /* We direct each output of the derivation to a temporary location
+           in the Nix store.  Afterwards, we move the outputs to their
+           final, content-addressed location. */
+        Path tmpPath = makeRandomStorePath(namePartOf(i->second.eqClass));
+        printMsg(lvlError, format("mapping output id `%1%', class `%2%' to `%3%'")
+            % i->first % i->second.eqClass % tmpPath);
+        assert(i->second.eqClass.size() == tmpPath.size());
+
+        debug(format("building path `%1%'") % tmpPath);
+        
+        tmpOutputs[i->second.eqClass] = tmpPath;
+
+        /* This is a referenceable path.  Make a note of that for when
+           we are scanning for references in the output. */
+        allPaths.insert(tmpPath);
+        
+        /* The environment variables and command-line arguments of the
+           builder refer to the output path equivalence class.  Cause
+           those references to be rewritten to the temporary
+           locations. */
+        rewrites[hashPartOf(i->second.eqClass)] = hashPartOf(tmpPath);
+
         if (pathIsLockedByMe(i->second.path)) {
             debug(format("putting derivation `%1%' to sleep because `%2%' is locked by another goal")
                 % drvPath % i->second.path);
             worker.waitForAnyGoal(shared_from_this());
             return;
         }
+    }
 
     /* Obtain locks on all output paths.  The locks are automatically
        released when we exit this function or Nix crashes.  If we
        can't acquire the lock, then continue; hopefully some other
        goal can start a build, and if not, the main loop will sleep a
        few seconds and then retry this goal. */
+#if 0
+    /* !!! acquire lock on the derivation or something? or on a
+       pseudo-path representing the output equivalence class? */
+    /* TODO: locking is no longer an issue with random temporary paths, but at the cost of having no blocking if we build the same thing twice in parallel. Maybe the "random" path should actually be a hash of the placeholder and the name of the user who started the build. */
     if (!outputLocks.lockPaths(outputPaths(drv.outputs), "", false)) {
         worker.waitForAWhile(shared_from_this());
         return;
     }
+#endif
 
+#if 0
     /* Now check again whether the outputs are valid.  This is because
        another process may have started building in parallel.  After
        it has finished and released the locks, we can (and should)
@@ -1273,6 +1345,7 @@ void DerivationGoal::tryToBuild()
        acquired the lock. */
     foreach (DerivationOutputs::iterator, i, drv.outputs)
         if (pathFailed(i->second.path)) return;
+#endif
 
     /* Don't do a remote build if the derivation has the attribute
        `preferLocalBuild' set.  Also, check and repair modes are only
@@ -1505,6 +1578,9 @@ void DerivationGoal::buildDone()
 
 HookReply DerivationGoal::tryBuildHook()
 {
+    return rpDecline;
+
+#if 0
     if (!settings.useBuildHook || getEnv("NIX_BUILD_HOOK") == "") return rpDecline;
 
     if (!worker.hook)
@@ -1580,6 +1656,7 @@ HookReply DerivationGoal::tryBuildHook()
             % drvPath % drv.platform % logFile);
 
     return rpAccept;
+#endif
 }
 
 
@@ -1600,9 +1677,9 @@ int childEntry(void * arg)
 void DerivationGoal::startBuilder()
 {
     startNest(nest, lvlInfo, format(
-            buildMode == bmRepair ? "repairing path(s) %1%" :
-            buildMode == bmCheck ? "checking path(s) %1%" :
-            "building path(s) %1%") % showPaths(missingPaths));
+            buildMode == bmRepair ? "repairing derivation %1%" :
+            buildMode == bmCheck ? "checking derivation %1%" :
+            "building derivation %1%") % drvPath);
 
     /* Right platform? */
     if (!canBuildLocally(drv.platform)) {
@@ -1639,8 +1716,9 @@ void DerivationGoal::startBuilder()
     env["NIX_BUILD_CORES"] = (format("%d") % settings.buildCores).str();
 
     /* Add all bindings specified in the derivation. */
+    /* The temporary output paths, environment variables, and command-line arguments contain placeholder store paths because the fixed paths are no longer known in advance. Therefore, we rewrite them to the actual paths prior to running the builder. */
     foreach (StringPairs::iterator, i, drv.env)
-        env[i->first] = i->second;
+        env[i->first] = rewriteHashes(i->second, rewrites);
 
     /* Create a temporary directory where the build will take
        place. */
@@ -1901,7 +1979,10 @@ void DerivationGoal::startBuilder()
 
 
     /* Run the builder. */
-    printMsg(lvlChatty, format("executing builder `%1%'") % drv.builder);
+
+    /* We also have to rewrite the path to the builder. */
+    string builder = rewriteHashes(drv.builder, rewrites);
+    printMsg(lvlChatty, format("executing builder `%1%'") % builder);
 
     /* Create the log file. */
     Path logFile = openLogFile();
@@ -2123,10 +2204,11 @@ void DerivationGoal::initChild()
         /* Fill in the environment. */
         Strings envStrs;
         foreach (Environment::const_iterator, i, env)
-            envStrs.push_back(rewriteHashes(i->first + "=" + i->second, rewritesToTmp));
+            envStrs.push_back(rewriteHashes(i->first + "=" + i->second, rewritesToTmp)); // rewrites
         const char * * envArr = strings2CharPtrs(envStrs);
 
-        Path program = drv.builder.c_str();
+        string builder = rewriteHashes(drv.builder, rewrites);
+        Path program = builder.c_str();
         std::vector<const char *> args; /* careful with c_str()! */
         string user; /* must be here for its c_str()! */
 
@@ -2154,7 +2236,7 @@ void DerivationGoal::initChild()
         }
 
         /* Fill in the arguments. */
-        string builderBasename = baseNameOf(drv.builder);
+        string builderBasename = baseNameOf(builder);
         args.push_back(builderBasename.c_str());
         foreach (Strings::iterator, i, drv.args)
             args.push_back(rewriteHashes(*i, rewritesToTmp).c_str());
@@ -2166,7 +2248,7 @@ void DerivationGoal::initChild()
         inSetup = false;
         execve(program.c_str(), (char * *) &args[0], (char * *) envArr);
 
-        throw SysError(format("executing `%1%'") % drv.builder);
+        throw SysError(format("executing `%1%'") % builder);
 
     } catch (std::exception & e) {
         writeToStderr("build error: " + string(e.what()) + "\n");
@@ -2211,11 +2293,13 @@ void DerivationGoal::registerOutputs()
 
     ValidPathInfos infos;
 
+#if 0
     /* Check whether the output paths were created, and grep each
        output path to determine what other paths it references.  Also make all
        output paths read-only. */
+#endif
     foreach (DerivationOutputs::iterator, i, drv.outputs) {
-        Path path = i->second.path;
+        Path path = tmpOutputs[i->second.eqClass];
         if (missingPaths.find(path) == missingPaths.end()) continue;
 
         Path actualPath = path;
@@ -2319,6 +2403,51 @@ void DerivationGoal::registerOutputs()
         HashResult hash;
         PathSet references = scanForReferences(actualPath, allPaths, hash);
 
+// XXX
+        PathSet referenced;
+        if (!pathExists(path + "/nix-support/no-scan")) {
+            Paths referenced2 = filterReferences(path, 
+                Paths(allPaths.begin(), allPaths.end()));
+            referenced = PathSet(referenced2.begin(), referenced2.end());
+
+            /* For debugging, print out the referenced and
+               unreferenced paths. */
+            PathSet unreferenced;
+            insert_iterator<PathSet> ins(unreferenced, unreferenced.begin());
+            set_difference(
+                inputPaths.begin(), inputPaths.end(),
+                referenced.begin(), referenced.end(), ins);
+            printMsg(lvlError, format("unreferenced inputs: %1%") % showPaths(unreferenced));
+            printMsg(lvlError, format("referenced inputs: %1%") % showPaths(referenced));
+        }
+
+        /* Rewrite each output to a name matching its content hash.
+           I.e., enforce the hash invariant: the hash part of a store
+           path matches the contents at that path.
+
+           This also registers the final output path as valid, and
+           sets it references. */
+        Path finalPath = addToStore(path,
+            hashPartOf(path), namePartOf(path),
+            referenced);
+        printMsg(lvlError, format("produced final path `%1%'") % finalPath);
+
+        /* Register the fact that this output path is a member of some
+           output path equivalence class (for a certain user, at
+           least).  This is how subsequent derivations will be able to
+           find it. */
+        Transaction txn;
+        createStoreTransaction(txn);
+        addOutputEqMember(txn, i->second.eqClass, currentTrustId, finalPath);
+        txn.commit();
+
+        /* Get rid of the temporary output.  !!! optimise all this by
+           *moving* the temporary output to the new location and
+           applying rewrites in situ. */
+        deletePath(path);
+    }
+// End XXX
+    
         if (buildMode == bmCheck) {
             ValidPathInfo info = worker.store.queryPathInfo(path);
             if (hash.first != info.hash)
@@ -2478,6 +2607,7 @@ void DerivationGoal::handleEOF(int fd)
 }
 
 
+#if 0
 PathSet DerivationGoal::checkPathValidity(bool returnValid, bool checkHash)
 {
     PathSet result;
@@ -2490,7 +2620,22 @@ PathSet DerivationGoal::checkPathValidity(bool returnValid, bool checkHash)
     }
     return result;
 }
+#endif
 
+
+DerivationGoal::OutputEqClasses DerivationGoal::checkOutputValidity(bool returnValid)
+{
+    OutputEqClasses result;
+    foreach (DerivationOutputs::iterator, i, drv.outputs) {
+        PathSet paths = findTrustedEqClassMembers(i->second.eqClass, currentTrustId);
+        if (paths.size() > 0) {
+            if (returnValid) result.insert(i->second.eqClass);
+        } else {
+            if (!returnValid) result.insert(i->second.eqClass);
+        }
+    }
+    return result;
+}
 
 bool DerivationGoal::pathFailed(const Path & path)
 {
@@ -2535,11 +2680,13 @@ private:
     /* The store path that should be realised through a substitute. */
     Path storePath;
 
+#if 0
     /* The remaining substituters. */
     Paths subs;
 
     /* The current substituter. */
     Path sub;
+#endif
 
     /* Whether any substituter can realise this path */
     bool hasSubstitute;
@@ -2655,7 +2802,7 @@ void SubstitutionGoal::tryNext()
 {
     trace("trying next substituter");
 
-    if (subs.size() == 0) {
+    if (true /* !!! subs.size() == 0 */) {
         /* None left.  Terminate this goal and let someone else deal
            with it. */
         debug(format("path `%1%' is required, but there is no substituter that can build it") % storePath);
@@ -2666,8 +2813,10 @@ void SubstitutionGoal::tryNext()
         return;
     }
 
+#if 0
     sub = subs.front();
     subs.pop_front();
+#endif
 
     SubstitutablePathInfos infos;
     PathSet dummy(singleton<PathSet>(storePath));
@@ -2711,6 +2860,7 @@ void SubstitutionGoal::referencesValid()
 
 void SubstitutionGoal::tryToRun()
 {
+#if 0
     trace("trying to run");
 
     /* Make sure that we are allowed to start a build.  Note that even
@@ -2793,11 +2943,13 @@ void SubstitutionGoal::tryToRun()
 
     if (settings.printBuildTrace)
         printMsg(lvlError, format("@ substituter-started %1% %2%") % storePath % sub);
+#endif
 }
 
 
 void SubstitutionGoal::finished()
 {
+#if 0
     trace("substitute finished");
 
     /* Since we got an EOF on the logger pipe, the substitute is
@@ -2885,6 +3037,7 @@ void SubstitutionGoal::finished()
         printMsg(lvlError, format("@ substituter-succeeded %1%") % storePath);
 
     amDone(ecSuccess);
+#endif
 }
 
 

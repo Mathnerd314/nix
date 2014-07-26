@@ -55,6 +55,10 @@ extern PathFilter defaultPathFilter;
 void dumpPath(const Path & path, Sink & sink,
     PathFilter & filter = defaultPathFilter);
 
+/* Make an archive consisting of a single non-executable regular
+   file, with specified string contents. */
+void makeSingletonArchive(const string & contents, DumpSink & sink);
+
 struct ParseSink
 {
     virtual void createDirectory(const Path & path) { };

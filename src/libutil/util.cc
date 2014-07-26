@@ -152,13 +152,26 @@ string baseNameOf(const Path & path)
     return string(path, pos + 1);
 }
 
+PathHash hashPartOf(const Path & path)
+{
+    assertStorePath(path);
+    return PathHash(string(path, nixStore.size() + 1, pathHashLen));
+}
+
+
+string namePartOf(const Path & path)
+{
+    assertStorePath(path);
+    return string(path, nixStore.size() + 1 + pathHashLen + 1);
+}
 
 bool isInDir(const Path & path, const Path & dir)
 {
     return path[0] == '/'
         && string(path, 0, dir.size()) == dir
         && path.size() >= dir.size() + 2
-        && path[dir.size()] == '/';
+        && path[dir.size()] == '/'
+        && path[dir.size() + 1 + pathHashLen] == '-';
 }
 
 

@@ -28,6 +28,7 @@ create trigger if not exists DeleteSelfRefs before delete on ValidPaths
     delete from Refs where referrer = old.id and reference = old.id;
   end;
 
+/*
 create table if not exists DerivationOutputs (
     drv  integer not null,
     id   text not null, -- symbolic output id, usually "out"
@@ -42,3 +43,17 @@ create table if not exists FailedPaths (
     path text primary key not null,
     time integer not null
 );
+*/
+
+/* dbEquivalences :: OutputEqClass -> [(TrustId, Path)]
+
+   Lists the output paths that have been produced for each extension
+   class; i.e., the extension of an extension class. */
+static TableId dbEquivalences = 0;
+
+/* dbEquivalenceClasses :: Path -> [OutputEqClass]
+
+   !!! should be [(TrustId, OutputEqClass)] ?
+
+   Lists for each output path the extension classes that it is in. */
+static TableId dbEquivalenceClasses = 0;

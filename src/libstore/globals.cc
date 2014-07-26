@@ -35,6 +35,7 @@ Settings::Settings()
     long res = sysconf(_SC_NPROCESSORS_ONLN);
     if (res > 0) buildCores = res;
 #endif
+    currentTrustId = ""; // XXX
     readOnlyMode = false;
     thisSystem = SYSTEM;
     maxSilentTime = 0;

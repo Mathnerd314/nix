@@ -602,6 +602,10 @@ static void prim_derivationStrict(EvalState & state, const Pos & pos, Value * * 
         foreach (DerivationOutputs::iterator, i, drv.outputs)
             if (i->second.path == "") {
                 Path outPath = makeOutputPath(i->first, h, drvName);
+                /* XXX */
+                Path outPath;
+                PathHash outPathHash;
+                makeOutputPath(h, drvName, outPath, outPathHash);
                 drv.env[i->first] = outPath;
                 i->second.path = outPath;
             }

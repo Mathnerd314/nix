@@ -79,7 +79,8 @@ static PathSet realisePath(Path path, bool build = true)
             DerivationOutputs::iterator i = drv.outputs.find(*j);
             if (i == drv.outputs.end())
                 throw Error(format("derivation `%1%' does not have an output named `%2%'") % p.first % *j);
-            Path outPath = i->second.path;
+            Path outPath = findTrustedEqClassMember(findOutputEqClass(drv, drv.name), currentTrustId);
+            // Path outPath = i->second.path;
             if (gcRoot == "")
                 printGCWarning();
             else {
@@ -169,6 +170,7 @@ static void opAdd(Strings opFlags, Strings opArgs)
 }
 
 
+#if 0
 /* Preload the output of a fixed-output derivation into the Nix
    store. */
 static void opAddFixed(Strings opFlags, Strings opArgs)
@@ -213,6 +215,7 @@ static void opPrintFixedPath(Strings opFlags, Strings opArgs)
         makeFixedOutputPath(recursive, hashAlgo,
             parseHash16or32(hashAlgo, hash), name);
 }
+#endif
 
 
 static PathSet maybeUseOutputs(const Path & storePath, bool useOutput, bool forceRealise)
@@ -220,10 +223,14 @@ static PathSet maybeUseOutputs(const Path & storePath, bool useOutput, bool forc
     if (forceRealise) realisePath(storePath);
     if (useOutput && isDerivation(storePath)) {
         Derivation drv = derivationFromPath(*store, storePath);
+        return findTrustedEqClassMember(
+            findOutputEqClass(drv, "out"), currentTrustId);
+#if 0
         PathSet outputs;
         foreach (DerivationOutputs::iterator, i, drv.outputs)
             outputs.insert(i->second.path);
         return outputs;
+#endif
     }
     else return singleton<PathSet>(storePath);
 }
@@ -313,7 +320,9 @@ static void opQuery(Strings opFlags, Strings opArgs)
                 if (forceRealise) realisePath(*i);
                 Derivation drv = derivationFromPath(*store, *i);
                 foreach (DerivationOutputs::iterator, j, drv.outputs)
-                    cout << format("%1%\n") % j->second.path;
+                    cout << format("%1%\n") % findTrustedEqClassMember(
+                    findOutputEqClass(drv, "out"),
+                    currentTrustId); // j->second.path;
             }
             break;
         }
@@ -340,11 +349,14 @@ static void opQuery(Strings opFlags, Strings opArgs)
         }
 
         case qDeriver:
+#if 0
             foreach (Strings::iterator, i, opArgs) {
                 Path deriver = store->queryDeriver(followLinksToStorePath(*i));
                 cout << format("%1%\n") %
                     (deriver == "" ? "unknown-deriver" : deriver);
             }
+#endif
+            assert(0);
             break;
 
         case qBinding:
@@ -1031,10 +1043,12 @@ void run(Strings args)
             op = opRealise;
         else if (arg == "--add" || arg == "-A")
             op = opAdd;
+#if 0
         else if (arg == "--add-fixed")
             op = opAddFixed;
         else if (arg == "--print-fixed-path")
             op = opPrintFixedPath;
+#endif
         else if (arg == "--delete")
             op = opDelete;
         else if (arg == "--query" || arg == "-q")

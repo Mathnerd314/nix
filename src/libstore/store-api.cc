@@ -116,6 +116,7 @@ void checkStoreName(const string & name)
      name to make sure that changes to either of those are reflected
      in the hash (e.g. you won't get /nix/store/<h>-name1 and
      /nix/store/<h>-name2 with equal hash parts).
+     It does not include the store location in the intensional model.
      
    <type> = one of:
      "text:<r1>:<r2>:...<rN>"
@@ -165,21 +166,38 @@ void checkStoreName(const string & name)
 */
 
 
+#if 0
 Path makeStorePath(const string & type,
     const Hash & hash, const string & name)
+#endif
+void makeStorePath(const Hash & contentHash, const string & name,
+    Path & path, PathHash & pathHash)
 {
+    checkStoreName(name);
+
+    /* e.g., "sha256:1abc...:foo.tar.gz" */
+    string s = "sha256:" + printHash(contentHash) + ":" + name;
+#if 0
     /* e.g., "source:sha256:1abc...:/nix/store:foo.tar.gz" */
     string s = type + ":sha256:" + printHash(hash) + ":"
         + settings.nixStore + ":" + name;
+#endif
 
-    checkStoreName(name);
-
-    return settings.nixStore + "/"
-        + printHash32(compressHash(hashString(htSHA256, s), 20))
-        + "-" + name;
+    pathHash = PathHash(hashString(htSHA256, s)); // printHash32(compressHash(hashString(htSHA256, s), 20))
+    
+    path = settings.nixStore + "/" + pathHash.toString() + "-" + name;
 }
 
+// Random hash generation.
+Path makeRandomStorePath(const string & suffix)
+{
+    Hash hash(htSHA256);
+    for (unsigned int i = 0; i < hash.hashSize; ++i)
+        hash.hash[i] = rand() % 256; // !!! improve
+    return nixStore + "/" + PathHash(hash).toString() + "-" + suffix;
+}
 
+#if 0
 Path makeOutputPath(const string & id,
     const Hash & hash, const string & name)
 {
@@ -198,6 +216,7 @@ Path makeFixedOutputPath(bool recursive,
                 printHashType(hashAlgo) + ":" + printHash(hash) + ":"),
             name);
 }
+#endif
 
 
 std::pair<Path, Hash> computeStorePathForPath(const Path & srcPath,

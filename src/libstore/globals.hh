@@ -79,6 +79,10 @@ struct Settings {
        auto-detected. */
     unsigned int buildCores;
 
+    /* Current trust ID.  !!! Of course, this shouldn't be a global
+       variable. */
+    string currentTrustId;
+
     /* Read-only mode.  Don't copy stuff to the store, don't change
        the database. */
     bool readOnlyMode;

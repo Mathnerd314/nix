@@ -403,7 +403,10 @@ static void queryInstSources(EvalState & state,
 
                 if (isDerivation(path)) {
                     elem.setDrvPath(path);
-                    elem.setOutPath(findOutput(derivationFromPath(*store, path), "out"));
+                    elem.setOutPath(
+                        /* XXX check this; may not give a result */
+                        findTrustedEqClassMember(
+                            findOutputEqClass(derivationFromPath(*store, path), "out"), currentTrustId));
                     if (name.size() >= drvExtension.size() &&
                         string(name, name.size() - drvExtension.size()) == drvExtension)
                         name = string(name, 0, name.size() - drvExtension.size());
@@ -977,7 +980,7 @@ static void opQuery(Globals & globals,
 
 
     /* Query which paths have substitutes. */
-    PathSet validPaths, substitutablePaths;
+    PathSet validPaths /*, substitutablePaths*/;
     if (printStatus || globals.prebuiltOnly) {
         PathSet paths;
         foreach (vector<DrvInfo>::iterator, i, elems)
@@ -988,7 +991,7 @@ static void opQuery(Globals & globals,
                 i->setFailed();
             }
         validPaths = store->queryValidPaths(paths);
-        substitutablePaths = store->querySubstitutablePaths(paths);
+//        substitutablePaths = store->querySubstitutablePaths(paths);
     }
 
 
@@ -1022,7 +1025,7 @@ static void opQuery(Globals & globals,
 
             if (printStatus) {
                 Path outPath = i->queryOutPath();
-                bool hasSubs = substitutablePaths.find(outPath) != substitutablePaths.end();
+                bool hasSubs = false // substitutablePaths.find(outPath) != substitutablePaths.end();
                 bool isInstalled = installed.find(outPath) != installed.end();
                 bool isValid = validPaths.find(outPath) != validPaths.end();
                 if (xmlOutput) {

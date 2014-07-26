@@ -59,13 +59,240 @@ void computeFSClosure(StoreAPI & store, const Path & path,
 }
 
 
-Path findOutput(const Derivation & drv, string id)
+OutputEqClass findOutputEqClass(const Derivation & drv, const string & id)
 {
     foreach (DerivationOutputs::const_iterator, i, drv.outputs)
-        if (i->first == id) return i->second.path;
+        if (i->first == id) return i->second.eqClass;
     throw Error(format("derivation has no output `%1%'") % id);
 }
 
+/* Before consolidating/building, consider all trusted paths in the equivalence classes of the input derivations.  */
+PathSet findTrustedEqClassMembers(const OutputEqClass & eqClass,
+    const TrustId & trustId)
+{
+    OutputEqMembers members;
+    queryOutputEqMembers(noTxn, eqClass, members);
+
+    PathSet result;
+    for (OutputEqMembers::iterator j = members.begin(); j != members.end(); ++j)
+        if (j->trustId == trustId || j->trustId == "root") result.insert(j->path);
+
+    return result;
+}
+
+
+Path findTrustedEqClassMember(const OutputEqClass & eqClass,
+    const TrustId & trustId)
+{
+    PathSet paths = findTrustedEqClassMembers(eqClass, trustId);
+    if (paths.size() == 0)
+        throw Error(format("no output path in equivalence class `%1%' is known") % eqClass);
+    return *(paths.begin());
+}
+
+
+typedef map<OutputEqClass, PathSet> ClassMap;
+typedef map<OutputEqClass, Path> FinalClassMap;
+
+static void findBestRewrite(const ClassMap::const_iterator & pos,
+    const ClassMap::const_iterator & end,
+    const PathSet & selection, const PathSet & unselection,
+    unsigned int & bestCost, PathSet & bestSelection)
+{
+    if (pos != end) {
+        for (PathSet::iterator i = pos->second.begin();
+             i != pos->second.end(); ++i)
+        {
+            PathSet selection2(selection);
+            selection2.insert(*i);
+            
+            PathSet unselection2(unselection);
+            for (PathSet::iterator j = pos->second.begin();
+                 j != pos->second.end(); ++j)
+                if (i != j) unselection2.insert(*j);
+            
+            ClassMap::const_iterator j = pos; ++j;
+            findBestRewrite(j, end, selection2, unselection2,
+                bestCost, bestSelection);
+        }
+        return;
+    }
+
+    PathSet badPaths;
+    for (PathSet::iterator i = selection.begin();
+         i != selection.end(); ++i)
+    {
+        PathSet closure;
+        computeFSClosure(*i, closure); 
+        for (PathSet::iterator j = closure.begin();
+             j != closure.end(); ++j)
+            if (unselection.find(*j) != unselection.end())
+                badPaths.insert(*i);
+    }
+    
+    //    printMsg(lvlError, format("cost %1% %2%") % badPaths.size() % showPaths(badPaths));
+
+    if (badPaths.size() < bestCost) {
+        bestCost = badPaths.size();
+        bestSelection = selection;
+    }
+}
+
+
+static Path maybeRewrite(const Path & path, const PathSet & selection,
+    const FinalClassMap & finalClassMap, const PathSet & sources,
+    Replacements & replacements,
+    unsigned int & nrRewrites)
+{
+    startNest(nest, lvlError, format("considering rewriting `%1%'") % path);
+
+    assert(selection.find(path) != selection.end());
+
+    if (replacements.find(path) != replacements.end()) return replacements[path];
+    
+    PathSet references;
+    queryReferences(noTxn, path, references);
+
+    HashRewrites rewrites;
+    PathSet newReferences;
+    
+    for (PathSet::iterator i = references.begin(); i != references.end(); ++i) {
+        /* Handle sources (which are not in any equivalence class) properly.  */
+        /* Also ignore self-references. */
+        if (*i == path || sources.find(*i) != sources.end()) {
+            newReferences.insert(*i);
+            continue;
+        }
+
+        OutputEqClasses classes;
+        queryOutputEqClasses(noTxn, *i, classes);
+        assert(classes.size() > 0);
+
+        FinalClassMap::const_iterator j = finalClassMap.find(*(classes.begin()));
+        assert(j != finalClassMap.end());
+        
+        Path newPath = maybeRewrite(j->second, selection,
+            finalClassMap, sources, replacements, nrRewrites);
+
+        if (*i != newPath)
+            rewrites[hashPartOf(*i)] = hashPartOf(newPath);
+
+        newReferences.insert(newPath);
+    }
+
+    /* Handle the case where all the direct references of a path are in the selection but some indirect reference isn't (in which case the path should still be rewritten). */
+    if (rewrites.size() == 0) {
+        replacements[path] = path;
+        return path;
+    }
+
+    printMsg(lvlError, format("rewriting `%1%'") % path);
+
+    Path newPath = addToStore(path,
+        hashPartOf(path), namePartOf(path),
+        references, rewrites);
+
+    /* Set the equivalence class for paths produced through rewriting. */
+    /* !!! we don't know which eqClass `path' is in!  That is to say,
+       we don't know which one is intended here. */
+    OutputEqClasses classes;
+    queryOutputEqClasses(noTxn, path, classes);
+    for (PathSet::iterator i = classes.begin(); i != classes.end(); ++i) {
+        Transaction txn;
+        createStoreTransaction(txn);
+        addOutputEqMember(txn, *i, currentTrustId, newPath);
+        txn.commit();
+    }
+
+    nrRewrites++;
+
+    printMsg(lvlError, format("rewrote `%1%' to `%2%'") % path % newPath);
+
+    replacements[path] = newPath;
+        
+    return newPath;
+}
+
+/*
+If we do 
+$ NIX_USER_ID=foo nix-env -i libXext $ NIX_USER_ID=root nix-env -i libXt $ NIX_USER_ID=foo nix-env -i libXmu 
+(where libXmu depends on libXext and libXt, who both depend on libX11), then the following will happen: 
+* User foo builds libX11 and libXext because they don't exist yet. 
+* User root builds libX11 and libXt because the latter doesn't exist yet, while the former *does* exist but cannot be trusted. The instance of libX11 built by root will almost certainly differ from the one built by foo, so they are stored in separate locations. 
+* User foo builds libXmu, which requires libXext and libXt. Foo has trusted copies of both (libXext was built by himself, while libXt was built by root, who is trusted by foo). So libXmu is built with foo's libXext and root's libXt as inputs. 
+* The resulting libXmu will link against two copies of libX11, namely the one used by foo's libXext and the one used by root's libXt. This is bad semantically (it's observable behaviour, and might well lead to build time or runtime failure (e.g., duplicate definitions of symbols)) and in terms of efficiency (the closure of libXmu contains two copies of libX11, so both must be deployed). 
+The problem is to apply hash rewriting to "consolidate" the set of input paths to a build. The invariant we wish to maintain is that any closure may contain at most one path from each equivalence class. 
+So in the case of a collision, we select one path from each class, and *rewrite* all paths in that set to point only to paths in that set. For instance, in the example above, we can rewrite foo's libXext to link against root's libX11. That is, the hash part of foo's libX11 is replaced by the hash part of root's libX11. 
+*/
+PathSet consolidatePaths(const PathSet & paths, bool checkOnly,
+    Replacements & replacements)
+{
+    printMsg(lvlError, format("consolidating"));
+    
+    ClassMap classMap;
+    PathSet sources;
+    
+    for (PathSet::const_iterator i = paths.begin(); i != paths.end(); ++i) {
+        OutputEqClasses classes;
+        queryOutputEqClasses(noTxn, *i, classes);
+
+        if (classes.size() == 0)
+            sources.insert(*i);
+        else
+            for (OutputEqClasses::iterator j = classes.begin(); j != classes.end(); ++j)
+                classMap[*j].insert(*i);
+    }
+
+    printMsg(lvlError, format("found %1% sources %2%") % sources.size() % showPaths(sources));
+
+    bool conflict = false;
+    for (ClassMap::iterator i = classMap.begin(); i != classMap.end(); ++i)
+        if (i->second.size() >= 2) {
+            printMsg(lvlError, format("conflict in eq class `%1%'") % i->first);
+            conflict = true;
+        }
+
+    if (!conflict) return paths;
+    
+    assert(!checkOnly);
+
+    // The hard part is to figure out which path to select from each class. Some selections may be cheaper than others (i.e., require fewer rewrites). 
+    // The current implementation is rather dumb: it tries all possible selections, and picks the cheapest.
+    // !!! This is an exponential time algorithm.
+    // There certainly are more efficient common-case (heuristic) approaches. But I don't know yet if there is a worst-case polynomial time algorithm. 
+    const unsigned int infinity = 1000000;
+    unsigned int bestCost = infinity;
+    PathSet bestSelection;
+    findBestRewrite(classMap.begin(), classMap.end(),
+        PathSet(), PathSet(), bestCost, bestSelection);
+
+    assert(bestCost != infinity);
+
+    printMsg(lvlError, format("cheapest selection %1% %2%")
+        % bestCost % showPaths(bestSelection));
+
+    FinalClassMap finalClassMap;
+    for (ClassMap::iterator i = classMap.begin(); i != classMap.end(); ++i)
+        for (PathSet::const_iterator j = i->second.begin(); j != i->second.end(); ++j)
+            if (bestSelection.find(*j) != bestSelection.end())
+                finalClassMap[i->first] = *j;
+
+    PathSet newPaths;
+    unsigned int nrRewrites = 0;
+    replacements.clear();
+    for (PathSet::iterator i = bestSelection.begin();
+         i != bestSelection.end(); ++i)
+        newPaths.insert(maybeRewrite(*i, bestSelection, finalClassMap,
+                            sources, replacements, nrRewrites));
+
+    newPaths.insert(sources.begin(), sources.end());
+
+    assert(nrRewrites == bestCost);
+
+    assert(newPaths.size() < paths.size());
+
+    return newPaths;
+}
 
 void queryMissing(StoreAPI & store, const PathSet & targets,
     PathSet & willBuild, PathSet & willSubstitute, PathSet & unknown,

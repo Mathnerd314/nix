@@ -144,6 +144,17 @@ static void initAndRun(int argc, char * * argv)
     gettimeofday(&tv, 0);
     srandom(tv.tv_usec);
 
+    /* Set the trust ID to the value of the NIX_USER_ID environment variable, or use the current user name. */
+    currentTrustId = getEnv("NIX_USER_ID"); /* !!! dangerous? */
+    if (currentTrustId == "") {
+        SwitchToOriginalUser sw;
+        uid_t uid = geteuid();
+        struct passwd * pw = getpwuid(uid);
+        if (!pw) throw Error(format("unknown user ID %1%, go away") % uid);
+        currentTrustId = pw->pw_name;
+    }
+    printMsg(lvlError, format("trust ID is `%1%'") % currentTrustId);
+
     /* Process the NIX_LOG_TYPE environment variable. */
     string lt = getEnv("NIX_LOG_TYPE");
     if (lt != "") setLogType(lt);

@@ -70,7 +70,38 @@ struct GCResults
     }
 };
 
+/* A trust identifier, which is a name of an entity involved in a
+   trust relation.  Right now this is just a user ID (e.g.,
+   `root'). */
+typedef string TrustId;
 
+
+/* An output path equivalence class.  They represent outputs of
+   derivations.  That is, a derivation can have several outputs (e.g.,
+   `out', `lib', `man', etc.), each of which maps to a output path
+   equivalence class.  They can map to a number of concrete paths,
+   depending on what users built the derivation.
+
+   Equivalence classes are actually "placeholder" store paths that
+   never get built.  They do occur in derivations however in
+   command-line arguments and environment variables, but get
+   substituted with concrete paths when we actually build. */
+typedef Path OutputEqClass;
+
+typedef set<OutputEqClass> OutputEqClasses;
+
+
+/* A member of an output path equivalence class, i.e., a store path
+   that has been produced by a certain derivation. */
+struct OutputEqMember
+{
+    TrustId trustId;
+    Path path;
+};
+
+typedef list<OutputEqMember> OutputEqMembers;
+
+#if 0
 struct SubstitutablePathInfo
 {
     Path deriver;
@@ -80,6 +111,7 @@ struct SubstitutablePathInfo
 };
 
 typedef std::map<Path, SubstitutablePathInfo> SubstitutablePathInfos;
+#endif 
 
 
 struct ValidPathInfo 
@@ -131,9 +163,20 @@ public:
     virtual void queryReferrers(const Path & path,
         PathSet & referrers) = 0;
 
+    virtual void addOutputEqMember(const Transaction & txn,
+        const OutputEqClass & eqClass, const TrustId & trustId,
+        const Path & path);
+
+    virtual void queryOutputEqMembers(const Transaction & txn,
+        const OutputEqClass & eqClass, OutputEqMembers & members);
+
+    virtual void queryOutputEqClasses(const Transaction & txn,
+        const Path & path, OutputEqClasses & classes);
+#if 0
     /* Query the deriver of a store path.  Return the empty string if
        no deriver has been set. */
     virtual Path queryDeriver(const Path & path) = 0;
+#endif
 
     /* Return all currently valid derivations that have `path' as an
        output.  (Note that the result of `queryDeriver()' is the
@@ -161,12 +204,17 @@ public:
         SubstitutablePathInfos & infos) = 0;
     
     /* Copy the contents of a path to the store and register the
-       validity the resulting path.  The resulting path is returned.
+       validity of the resulting path.  The resulting path is returned.
        The function object `filter' can be used to exclude files (see
        libutil/archive.hh). */
+    virtual Path addToStore(const Path & srcPath, const PathHash & selfHash = PathHash(),
+        const string & suffix = "", const PathSet & references = PathSet(),
+        const HashRewrites & rewrites = HashRewrites());
+#if 0
     virtual Path addToStore(const Path & srcPath,
         bool recursive = true, HashType hashAlgo = htSHA256,
         PathFilter & filter = defaultPathFilter, bool repair = false) = 0;
+#endif
 
     /* Like addToStore, but the contents written to the output path is
        a regular file containing the given string. */
@@ -282,6 +330,13 @@ Path followLinksToStorePath(const Path & path);
 
 
 /* Constructs a unique store path name. */
+void makeStorePath(const Hash & contentHash, const string & suffix,
+    Path & path, PathHash & pathHash);
+
+/* Constructs a random store path name.  Only to be used for temporary
+   build outputs, since these will violate the hash invariant. */
+Path makeRandomStorePath(const string & suffix);
+#if 0
 Path makeStorePath(const string & type,
     const Hash & hash, const string & name);
     
@@ -290,6 +345,7 @@ Path makeOutputPath(const string & id,
 
 Path makeFixedOutputPath(bool recursive,
     HashType hashAlgo, Hash hash, string name);
+#endif
 
 
 /* This is the preparatory part of addToStore() and addToStoreFixed();
