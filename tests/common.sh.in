@@ -1,4 +1,4 @@
-set -e
+# set -e
 
 datadir="@datadir@"
 
@@ -84,7 +84,6 @@ killDaemon() {
 
 fail() {
     echo "$1"
-    exit 1
 }
 
 set -x
