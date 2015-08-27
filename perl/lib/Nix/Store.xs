@@ -1,3 +1,4 @@
+
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
@@ -5,6 +6,7 @@
 /* Prevent a clash between some Perl and libstdc++ macros. */
 #undef do_open
 #undef do_close
+#undef seed
 
 #include <store-api.hh>
 #include <globals.hh>

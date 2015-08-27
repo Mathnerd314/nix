@@ -10,7 +10,7 @@
 #include <functional>
 
 #include <cstdio>
-
+#include <sstream>
 
 namespace nix {
 

@@ -1,6 +1,5 @@
 makefiles = \
   local.mk \
-  src/boost/format/local.mk \
   src/libutil/local.mk \
   src/libstore/local.mk \
   src/libmain/local.mk \
@@ -24,15 +23,16 @@ makefiles = \
   doc/manual/local.mk \
   tests/local.mk
 
-GLOBAL_CXXFLAGS += -std=c++0x -g -Wall
+GLOBAL_CXXFLAGS += -std=c++14 -g -Wall
+
 
 -include Makefile.config
 
 OPTIMIZE = 1
 
 ifeq ($(OPTIMIZE), 1)
-  GLOBAL_CFLAGS += -O3
-  GLOBAL_CXXFLAGS += -O3
+  GLOBAL_CFLAGS += -O0
+  GLOBAL_CXXFLAGS += -O0
 endif
 
 include mk/lib.mk
