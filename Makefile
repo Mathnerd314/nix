@@ -31,8 +31,8 @@ GLOBAL_CXXFLAGS += -std=c++14 -g -Wall
 OPTIMIZE = 1
 
 ifeq ($(OPTIMIZE), 1)
-  GLOBAL_CFLAGS += -O0
-  GLOBAL_CXXFLAGS += -O0
+  GLOBAL_CFLAGS += -O3
+  GLOBAL_CXXFLAGS += -O3
 endif
 
 include mk/lib.mk

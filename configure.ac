@@ -209,6 +209,12 @@ PKG_CHECK_MODULES([SQLITE3], [sqlite3 >= 3.6.19], [CXXFLAGS="$SQLITE3_CFLAGS $CX
 # Look for libcurl, a required dependency.
 PKG_CHECK_MODULES([LIBCURL], [libcurl], [CXXFLAGS="$LIBCURL_CFLAGS $CXXFLAGS"])
 
+# Look for boost, a required dependency.
+AC_LANG_PUSH([C++])
+AC_CHECK_HEADERS([boost/format.hpp], [true],
+  [AC_MSG_ERROR([Nix requires boost headers])])
+AC_LANG_POP([C++])
+
 
 # Look for libsodium, an optional dependency.
 PKG_CHECK_MODULES([SODIUM], [libsodium],

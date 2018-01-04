@@ -8,7 +8,6 @@ let
 
   systems = [ "x86_64-linux" "i686-linux" "x86_64-darwin" /* "x86_64-freebsd" "i686-freebsd" */ ];
 
-  boost159 = pkgs.callPackage ./1.59.nix { };
 
   jobs = rec {
 
@@ -24,7 +23,7 @@ let
         inherit officialRelease;
 
         buildInputs =
-          [ curl bison boost159 flex perl libxml2 libxslt bzip2
+          [ curl bison flex perl libxml2 libxslt bzip2
             tetex dblatex nukeReferences pkgconfig sqlite libsodium
             docbook5 docbook5_xsl
           ] ++ lib.optional (!lib.inNixShell) git;
@@ -82,7 +81,7 @@ let
         src = tarball;
 
         buildInputs =
-          [ curl perl boost159 bzip2 openssl pkgconfig sqlite boehmgc ]
+          [ curl perl bzip2 openssl pkgconfig sqlite boehmgc ]
           ++ lib.optional stdenv.isLinux libsodium;
 
         configureFlags = ''

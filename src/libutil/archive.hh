@@ -55,6 +55,10 @@ extern PathFilter defaultPathFilter;
 void dumpPath(const Path & path, Sink & sink,
     PathFilter & filter = defaultPathFilter);
 
+/* Make an archive consisting of a single non-executable regular
+   file, with specified string contents. */
+void writeSingletonArchive(const string & contents, Sink & sink);
+
 struct ParseSink
 {
     virtual void createDirectory(const Path & path) { };
@@ -69,7 +73,7 @@ struct ParseSink
 
 void parseDump(ParseSink & sink, Source & source);
 
-void restorePath(const Path & path, Source & source);
+void restorePath(const Path & path, Source & source, bool recursive = true);
 
 
 // FIXME: global variables are bad m'kay.

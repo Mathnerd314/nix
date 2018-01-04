@@ -36,7 +36,7 @@
 #endif
 
 #include <sqlite3.h>
-
+#include <boost/coroutine2/coroutine.hpp>
 
 namespace nix {
 
@@ -1360,14 +1360,32 @@ void LocalStore::invalidatePath(const Path & path)
        care of deleting the references entries for `path'. */
 }
 
-
-Path LocalStore::addToStoreFromDump(const string & dump, const string & name,
-    bool recursive, HashType hashAlgo, bool repair)
+struct HashAndReadSource : Source
 {
-    Hash h = hashString(hashAlgo, dump);
+    Source & readSource;
+    HashSink hashSink;
+    bool hashing;
+    HashAndReadSource(Source & readSource) : readSource(readSource), hashSink(htSHA256)
+    {
+        hashing = true;
+    }
+    size_t read(unsigned char * data, size_t len)
+    {
+        size_t n = readSource.read(data, len);
+        if (hashing) hashSink(data, n);
+        return n;
+    }
+    HashResult finish()
+    {
+        hashing = false;
+        return hashSink.finish();
+    }
+};
 
-    Path dstPath = makeFixedOutputPath(recursive, hashAlgo, h, name);
 
+Path LocalStore::addToStoreFromDump(Source & source, const Path & dstPath,
+    bool recursive, bool repair)
+{
     addTempRoot(dstPath);
 
     if (repair || !isValidPath(dstPath)) {
@@ -1381,24 +1399,11 @@ Path LocalStore::addToStoreFromDump(const string & dump, const string & name,
 
             if (pathExists(dstPath)) deletePath(dstPath);
 
-            if (recursive) {
-                StringSource source(dump);
-                restorePath(dstPath, source);
-            } else
-                writeFile(dstPath, dump);
+            HashAndReadSource hashSource(source);
+            restorePath(dstPath, source, recursive);
+            HashResult hash = hashSource.finish();
 
             canonicalisePathMetaData(dstPath, -1);
-
-            /* Register the SHA-256 hash of the NAR serialisation of
-               the path in the database.  We may just have computed it
-               above (if called with recursive == true and hashAlgo ==
-               sha256); otherwise, compute it here. */
-            HashResult hash;
-            if (recursive) {
-                hash.first = hashAlgo == htSHA256 ? h : hashString(htSHA256, dump);
-                hash.second = dump.size();
-            } else
-                hash = hashPath(htSHA256, dstPath);
 
             optimisePath(dstPath); // FIXME: combine with hashPath()
 
@@ -1415,6 +1420,49 @@ Path LocalStore::addToStoreFromDump(const string & dump, const string & name,
     return dstPath;
 }
 
+/* A Source that reads from what a coroutine writes to a sink */
+struct SinkSource : Source
+{
+    struct RawData {
+        const unsigned char * data;
+        size_t len;
+        RawData(const unsigned char * data, size_t len) : data(data), len(len) { }
+    };
+
+    struct CoRoutineSink : Sink {
+        CoRoutineSink (boost::coroutines2::asymmetric_coroutine<RawData>::push_type& sink) : sink(sink) { }
+        boost::coroutines2::asymmetric_coroutine<RawData>::push_type& sink;
+        void operator () (const unsigned char* data, size_t len) {
+            RawData r(data, len);
+            sink(r);
+        }
+    };
+
+    boost::coroutines2::asymmetric_coroutine<RawData>::pull_type source;
+    size_t pos;
+
+    SinkSource (std::function<void (Sink&)> func) :
+        source([func](boost::coroutines2::asymmetric_coroutine<RawData>::push_type& sink) {
+            CoRoutineSink s(sink);
+            func(s);
+        }),
+        pos(0) { }
+    size_t read(unsigned char * data, size_t len) {
+        if (!source) throw EndOfFile("no data in sink");
+        RawData r = source.get();
+        if(pos == r.len) {
+            // Out of data, get more
+            source();
+            if (!source) throw EndOfFile("end of sink reached");
+            r = source.get();
+            pos = 0;
+        }
+        size_t n = len >= r.len - pos ? r.len - pos : len;
+        memcpy(data, r.data + pos, n);
+        pos += n;
+        return n;
+    }
+};
 
 Path LocalStore::addToStore(const string & name, const Path & _srcPath,
     bool recursive, HashType hashAlgo, PathFilter & filter, bool repair)
@@ -1422,54 +1470,18 @@ Path LocalStore::addToStore(const string & name, const Path & _srcPath,
     Path srcPath(absPath(_srcPath));
     debug(format("adding ‘%1%’ to the store") % srcPath);
 
-    /* Read the whole path into memory. This is not a very scalable
-       method for very large paths, but `copyPath' is mainly used for
-       small files. */
-    StringSink sink;
-    if (recursive)
-        dumpPath(srcPath, sink, filter);
-    else
-        sink.s = readFile(srcPath);
-
-    return addToStoreFromDump(sink.s, name, recursive, hashAlgo, repair);
+    Hash h = recursive ? hashPath(hashAlgo, srcPath, filter).first : hashFile(hashAlgo, srcPath);
+    Path dstPath = makeFixedOutputPath(recursive, hashAlgo, h, name);
+    SinkSource source([&](Sink& sink){ dumpPath(srcPath, sink, filter); });
+    return addToStoreFromDump(source, dstPath, recursive, repair);
 }
-
 
 Path LocalStore::addTextToStore(const string & name, const string & s,
     const PathSet & references, bool repair)
 {
     Path dstPath = computeStorePathForText(name, s, references);
-
-    addTempRoot(dstPath);
-
-    if (repair || !isValidPath(dstPath)) {
-
-        PathLocks outputLock(singleton<PathSet, Path>(dstPath));
-
-        if (repair || !isValidPath(dstPath)) {
-
-            if (pathExists(dstPath)) deletePath(dstPath);
-
-            writeFile(dstPath, s);
-
-            canonicalisePathMetaData(dstPath, -1);
-
-            HashResult hash = hashPath(htSHA256, dstPath);
-
-            optimisePath(dstPath);
-
-            ValidPathInfo info;
-            info.path = dstPath;
-            info.hash = hash.first;
-            info.narSize = hash.second;
-            info.references = references;
-            registerValidPath(info);
-        }
-
-        outputLock.setDeletion(true);
-    }
-
-    return dstPath;
+    SinkSource source([&](Sink& sink){ writeSingletonArchive(s, sink); });
+    return addToStoreFromDump(source, dstPath, false, repair);
 }
 
 
@@ -1490,7 +1502,6 @@ struct HashAndWriteSink : Sink
         return hashSink.currentHash().first;
     }
 };
-
 
 #define EXPORT_MAGIC 0x4558494e
 
@@ -1560,24 +1571,6 @@ void LocalStore::exportPath(const Path & path, bool sign,
 }
 
 
-struct HashAndReadSource : Source
-{
-    Source & readSource;
-    HashSink hashSink;
-    bool hashing;
-    HashAndReadSource(Source & readSource) : readSource(readSource), hashSink(htSHA256)
-    {
-        hashing = true;
-    }
-    size_t read(unsigned char * data, size_t len)
-    {
-        size_t n = readSource.read(data, len);
-        if (hashing) hashSink(data, n);
-        return n;
-    }
-};
-
-
 /* Create a temporary directory in the store that won't be
    garbage-collected. */
 Path LocalStore::createTempDirInStore()
@@ -1620,8 +1613,7 @@ Path LocalStore::importPath(bool requireSignature, Source & source)
     Path deriver = readString(hashAndReadSource);
     if (deriver != "") assertStorePath(deriver);
 
-    Hash hash = hashAndReadSource.hashSink.finish().first;
-    hashAndReadSource.hashing = false;
+    Hash hash = hashAndReadSource.finish().first;
 
     bool haveSignature = readInt(hashAndReadSource) == 1;
 

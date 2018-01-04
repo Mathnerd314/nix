@@ -118,6 +118,21 @@ void dumpPath(const Path & path, Sink & sink, PathFilter & filter)
 }
 
 
+void writeSingletonArchive(const string & contents, Sink & sink)
+{
+    /* !!! hacky; have to keep this synchronised with dumpPath().  It
+       would be better to parameterise dumpPath() with a file system
+       "traverser". */
+    sink << archiveVersion1;
+    sink << "(";
+    sink << "type" << "regular";
+    unsigned int size = contents.size();
+    sink << "contents" << size;
+    sink((const unsigned char *) contents.c_str(), size);
+    writePadding(size, sink);
+    sink << ")";
+}
+
 static SerialisationError badArchive(string s)
 {
     return SerialisationError("bad archive: " + s);
@@ -284,10 +299,17 @@ void parseDump(ParseSink & sink, Source & source)
 struct RestoreSink : ParseSink
 {
     Path dstPath;
+    bool recursive;
     AutoCloseFD fd;
+
+    RestoreSink(const Path& dstPath, bool recursive)
+     : dstPath(dstPath), recursive(recursive)
+    {
+    }
 
     void createDirectory(const Path & path)
     {
+        if(!recursive) throw Error("regular file expected");
         Path p = dstPath + path;
         if (mkdir(p.c_str(), 0777) == -1)
             throw SysError(format("creating directory ‘%1%’") % p);
@@ -332,16 +354,16 @@ struct RestoreSink : ParseSink
 
     void createSymlink(const Path & path, const string & target)
     {
+        if(!recursive) throw Error("regular file expected");
         Path p = dstPath + path;
         nix::createSymlink(target, p);
     }
 };
 
 
-void restorePath(const Path & path, Source & source)
+void restorePath(const Path & path, Source & source, bool recursive)
 {
-    RestoreSink sink;
-    sink.dstPath = path;
+    RestoreSink sink(path, recursive);
     parseDump(sink, source);
 }
 

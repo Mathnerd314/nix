@@ -6,9 +6,9 @@ libstore_DIR := $(d)
 
 libstore_SOURCES := $(wildcard $(d)/*.cc)
 
-libstore_LIBS = libutil libformat
+libstore_LIBS = libutil
 
-libstore_LDFLAGS = -lsqlite3 -lbz2 -lcurl
+libstore_LDFLAGS = -lsqlite3 -lbz2 -lcurl -lboost_context
 
 ifeq ($(OS), SunOS)
 	libstore_LDFLAGS += -lsocket
